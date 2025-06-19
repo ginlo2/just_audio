@@ -1,3 +1,28 @@
+## 0.10.4
+
+* Fix bug on simultaneous loads.
+* Fix dispose crash on iOS.
+* Fix initial seek values on subsequent loads (@Abestanis).
+
+## 0.10.3
+
+* Fix pending timers bug in unit tests.
+* Fix NPE in Android position broadcast.
+
+## 0.10.2
+
+* Add Player.playerEvent.
+* Fix playing/playbackEvent emission order.
+* Fix rxdart errors on lower bound rxdart 0.26.0.
+* Fix MissingPluginException in dispose on iOS.
+
+## 0.10.1
+
+* Fix unhandled PlayerInterruptedException.
+* Fix duplicate load in active state.
+* Synchronize playlist API calls.
+* Improve position accuracy over Bluetooth on Android.
+
 ## 0.10.0
 
 * New playlist API.

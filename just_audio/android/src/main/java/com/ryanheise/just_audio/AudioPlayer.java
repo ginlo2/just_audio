@@ -11,6 +11,7 @@ import android.os.Looper;
 import androidx.media3.common.C;
 import androidx.media3.exoplayer.DefaultLivePlaybackSpeedControl;
 import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.LivePlaybackSpeedControl;
 import androidx.media3.exoplayer.LoadControl;
@@ -25,6 +26,9 @@ import androidx.media3.common.Tracks;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences;
 import androidx.media3.common.AudioAttributes;
+import androidx.media3.exoplayer.NoSampleRenderer;
+import androidx.media3.exoplayer.Renderer;
+import androidx.media3.exoplayer.RenderersFactory;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 import androidx.media3.common.Metadata;
 import androidx.media3.exoplayer.metadata.MetadataOutput;
@@ -250,7 +254,10 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     }
 
     private boolean updatePositionIfChanged() {
-        if (getCurrentPosition() == updatePosition) return false;
+        if (player == null) return false;
+        if (!player.getPlayWhenReady() || processingState != ProcessingState.ready) {
+            if (getCurrentPosition() == updatePosition) return false;
+        }
         updatePosition = getCurrentPosition();
         updateTime = System.currentTimeMillis();
         return true;
@@ -728,7 +735,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         case idle:
             break;
         case loading:
-            abortExistingConnection();
+            abortExistingConnection(false);
             player.stop();
             break;
         default:
@@ -749,7 +756,14 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
 
     private void ensurePlayerInitialized() {
         if (player == null) {
-            ExoPlayer.Builder builder = new ExoPlayer.Builder(context);
+            RenderersFactory renderersFactory = (eventHandler, videoListener, audioListener, textOutput, metadataOutput) -> {
+                Renderer[] defaultRenderers = new DefaultRenderersFactory(context)
+                    .createRenderers(eventHandler, videoListener, audioListener, textOutput, metadataOutput);
+                Renderer[] allRenderers = Arrays.copyOf(defaultRenderers, defaultRenderers.length + 1);
+                allRenderers[defaultRenderers.length] = new ObserverRenderer();
+                return allRenderers;
+            };
+            ExoPlayer.Builder builder = new ExoPlayer.Builder(context, renderersFactory);
             builder.setUseLazyPreparation(useLazyPreparation);
             if (loadControl != null) {
                 builder.setLoadControl(loadControl);
@@ -923,15 +937,17 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         }
     }
 
-    private void sendError(int errorCode, String errorMsg) {
-        sendError(errorCode, errorMsg, null);
+    private void sendError(int errorCode, String errorMsg, Object details) {
+        sendError(errorCode, errorMsg, details, true);
     }
 
-    private void sendError(int errorCode, String errorMsg, Object details) {
+    private void sendError(int errorCode, String errorMsg, Object details, boolean switchToIdle) {
         eventChannel.error(String.valueOf(errorCode), errorMsg, details);
         this.errorCode = errorCode;
         this.errorMessage = errorMsg;
-        processingState = ProcessingState.idle;
+        if (switchToIdle) {
+            processingState = ProcessingState.idle;
+        }
         broadcastImmediatePlaybackEvent();
         if (prepareResult != null) {
             prepareResult.error(String.valueOf(errorCode), errorMsg, details);
@@ -970,6 +986,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         if (!player.getPlayWhenReady()) return;
         player.setPlayWhenReady(false);
         updatePosition();
+        enqueuePlaybackEvent();
         if (playResult != null) {
             playResult.success(new HashMap<String, Object>());
             playResult = null;
@@ -1028,7 +1045,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
 
     public void dispose() {
         if (processingState == ProcessingState.loading) {
-            abortExistingConnection();
+            abortExistingConnection(true);
         }
         if (playResult != null) {
             playResult.success(new HashMap<String, Object>());
@@ -1058,8 +1075,8 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         }
     }
 
-    private void abortExistingConnection() {
-        sendError(ERROR_ABORT, "Connection aborted");
+    private void abortExistingConnection(boolean switchToIdle) {
+        sendError(ERROR_ABORT, "Connection aborted", null, switchToIdle);
     }
 
     // Dart can't distinguish between int sizes so
@@ -1102,5 +1119,32 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         buffering,
         ready,
         completed
+    }
+
+    public class ObserverRenderer extends NoSampleRenderer {
+        private long lastPosUs = 0L;
+        private int consecutivePosCount = 0;
+
+        @Override
+        public void render(long positionUs, long elapsedRealtimeUs) {
+            if (positionUs == lastPosUs) {
+                consecutivePosCount++;
+            } else {
+                if (consecutivePosCount >= 3) {
+                    handler.post(() -> {
+                        if (updatePositionIfChanged()) {
+                            broadcastImmediatePlaybackEvent();
+                        }
+                    });
+                }
+                consecutivePosCount = 0;
+            }
+            lastPosUs = positionUs;
+        }
+
+        @Override
+        public String getName() {
+            return "ObserverRenderer";
+        }
     }
 }
